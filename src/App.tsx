@@ -10,8 +10,75 @@ import {
   Clock, 
   User, 
   Puzzle, 
-  Activity 
+  Activity,
+  AlertTriangle
 } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, // 引入自定义 Token 登录
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  addDoc, 
+  onSnapshot, 
+  doc, 
+  updateDoc, 
+  arrayUnion, 
+  increment, 
+  serverTimestamp 
+} from 'firebase/firestore';
+
+// --- 配置逻辑 (智能识别环境) ---
+const getFirebaseConfig = () => {
+  try {
+    // 1. 优先尝试 Vite 环境变量 (Zeabur 部署时用这个)
+    // 使用 try-catch 包裹以防止在不支持 import.meta 的环境中报错
+    // @ts-ignore
+    if (typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_FIREBASE_API_KEY) {
+      return {
+        // @ts-ignore
+        apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+        // @ts-ignore
+        authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+        // @ts-ignore
+        projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+        // @ts-ignore
+        storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+        // @ts-ignore
+        messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+        // @ts-ignore
+        appId: import.meta.env.VITE_FIREBASE_APP_ID
+      };
+    }
+  } catch (e) {
+    // 忽略错误，继续尝试其他方式
+  }
+
+  // 2. 其次尝试全局变量 (Canvas 预览环境用这个)
+  // @ts-ignore
+  if (typeof __firebase_config !== 'undefined') {
+    // @ts-ignore
+    return JSON.parse(__firebase_config);
+  }
+  return null;
+};
+
+// 初始化 Firebase
+const firebaseConfig = getFirebaseConfig();
+// 为了防止报错，只有配置存在时才初始化
+const app = firebaseConfig ? initializeApp(firebaseConfig) : null;
+const auth = app ? getAuth(app) : null;
+const db = app ? getFirestore(app) : null;
+
+// --- 修复 Path 问题 ---
+// @ts-ignore
+const rawAppId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+// 关键修复: 将 appId 中的斜杠 / 替换为下划线 _，防止 Firebase 路径解析错误
+const appId = String(rawAppId).replace(/\//g, '_');
 
 // --- 组件部分 ---
 
@@ -60,42 +127,16 @@ const Modal = ({ isOpen, onClose, title, children }) => {
   );
 };
 
-// --- 预置数据 ---
-const INITIAL_TOPICS = [
-  {
-    id: '1',
-    title: '新《公司法》关于股东出资责任的认定',
-    description: '新法对于董监高的忠实义务和勤勉义务有了更细致的规定，在实务中我们应该如何理解这一变化？对于小股东权益保护有哪些具体影响？',
-    authorId: 'demo-user',
-    likes: 12,
-    eggs: 2,
-    comments: [
-      { id: 'c1', text: '这个变动确实很大，建议重点关注第五十三条。', authorName: '法务老张', createdAt: Date.now() - 86400000 }
-    ],
-    createdAt: Date.now() - 100000000
-  },
-  {
-    id: '2',
-    title: 'AI 时代，我们还需要学习编程吗？',
-    description: '现在的 AI 工具越来越强大，像 Cursor、Windsurf 这样的工具让不懂代码的人也能写程序。那么，深入学习编程语言是否还有必要？',
-    authorId: 'demo-user',
-    likes: 45,
-    eggs: 5,
-    comments: [
-      { id: 'c2', text: '我觉得逻辑思维比语法更重要。', authorName: 'CyberPunk', createdAt: Date.now() - 3600000 }
-    ],
-    createdAt: Date.now() - 50000000
-  }
-];
-
 // --- 主程序 ---
 
 export default function YouAreNeededApp() {
+  const [user, setUser] = useState(null);
   const [topics, setTopics] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [selectedTopic, setSelectedTopic] = useState(null);
-  
+  const [configError, setConfigError] = useState(!firebaseConfig); // 检查配置是否存在
+
   // 表单状态
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
@@ -103,111 +144,144 @@ export default function YouAreNeededApp() {
   const [commentAuthor, setCommentAuthor] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  // 初始化加载数据（从本地存储读取）
+  // 1. 登录逻辑 (修复权限问题)
   useEffect(() => {
-    const loadData = () => {
-      const savedTopics = localStorage.getItem('salon_topics');
-      if (savedTopics) {
-        setTopics(JSON.parse(savedTopics));
-      } else {
-        setTopics(INITIAL_TOPICS);
-        localStorage.setItem('salon_topics', JSON.stringify(INITIAL_TOPICS));
+    if (!auth) return;
+    
+    const doLogin = async () => {
+      try {
+        // 优先使用环境提供的初始 Token（如果有的话）
+        // @ts-ignore
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+           // @ts-ignore
+           await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+           // 否则回退到匿名登录
+           await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("登录失败:", err);
       }
-      setLoading(false);
     };
-    // 模拟网络延迟，让加载动画显示一会
-    setTimeout(loadData, 800);
+    doLogin();
+
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
   }, []);
 
-  // 保存数据到本地的辅助函数
-  const saveToLocal = (newTopics) => {
-    setTopics(newTopics);
-    localStorage.setItem('salon_topics', JSON.stringify(newTopics));
-  };
+  // 2. 数据监听逻辑 (Real-time)
+  useEffect(() => {
+    // 如果没有 user 或 db，直接返回
+    if (!user || !db) {
+      // 如果没有配置，loading 状态也应该结束（显示配置错误页）
+      if (!firebaseConfig) setLoading(false);
+      return;
+    }
+
+    try {
+      // 监听 'topics' 集合
+      const q = collection(db, 'artifacts', appId, 'public', 'data', 'topics');
+      
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+        const fetchedTopics = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        // 客户端排序（按时间倒序）
+        fetchedTopics.sort((a, b) => {
+          const tA = a.createdAt?.seconds || 0;
+          const tB = b.createdAt?.seconds || 0;
+          return tB - tA;
+        });
+        setTopics(fetchedTopics);
+        setLoading(false);
+      }, (error) => {
+        console.error("数据获取失败:", error);
+        setLoading(false);
+      });
+
+      return () => unsubscribe();
+    } catch (err) {
+      console.error("监听设置失败:", err);
+      setLoading(false);
+    }
+  }, [user]);
+
+  // 同步更新详情页数据
+  useEffect(() => {
+    if (selectedTopic) {
+      const liveTopic = topics.find(t => t.id === selectedTopic.id);
+      if (liveTopic) {
+        setSelectedTopic(liveTopic);
+      }
+    }
+  }, [topics]);
+
 
   // 添加议题
-  const handleAddTopic = (e) => {
+  const handleAddTopic = async (e) => {
     e.preventDefault();
-    if (!newTitle.trim()) return;
+    if (!newTitle.trim() || !user || !db) return;
 
     setSubmitting(true);
-    
-    // 模拟网络请求
-    setTimeout(() => {
-      const newTopic = {
-        id: crypto.randomUUID(),
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'topics'), {
         title: newTitle,
         description: newDesc,
-        authorId: 'local-user',
+        authorId: user.uid,
         likes: 0,
         eggs: 0,
         comments: [],
-        createdAt: Date.now()
-      };
-      
-      const newTopics = [newTopic, ...topics];
-      saveToLocal(newTopics);
-      
+        createdAt: serverTimestamp()
+      });
       setNewTitle('');
       setNewDesc('');
       setIsAddModalOpen(false);
+    } catch (err) {
+      console.error("发布失败:", err);
+      alert("发布失败，请检查网络或配置");
+    } finally {
       setSubmitting(false);
-    }, 500);
+    }
   };
 
   // 点赞/扔鸡蛋
-  const handleInteraction = (e, topicId, type) => {
+  const handleInteraction = async (e, topicId, type) => {
     e.stopPropagation();
-    const newTopics = topics.map(t => {
-      if (t.id === topicId) {
-        return { ...t, [type]: (t[type] || 0) + 1 };
-      }
-      return t;
-    });
+    if (!user || !db) return;
     
-    saveToLocal(newTopics);
-    
-    // 如果当前正在查看详情，也要同步更新详情数据
-    if (selectedTopic && selectedTopic.id === topicId) {
-      setSelectedTopic(prev => ({
-        ...prev,
-        [type]: (prev[type] || 0) + 1
-      }));
+    try {
+      const topicRef = doc(db, 'artifacts', appId, 'public', 'data', 'topics', topicId);
+      await updateDoc(topicRef, {
+        [type]: increment(1)
+      });
+    } catch (err) {
+      console.error("互动失败:", err);
     }
   };
 
   // 添加评论
-  const handleAddComment = (e) => {
+  const handleAddComment = async (e) => {
     e.preventDefault();
-    if (!newComment.trim() || !commentAuthor.trim() || !selectedTopic) return;
+    if (!newComment.trim() || !commentAuthor.trim() || !selectedTopic || !user || !db) return;
 
     const commentData = {
       id: crypto.randomUUID(),
       text: newComment,
       authorName: commentAuthor.trim(),
-      authorId: 'local-user',
+      authorId: user.uid,
       createdAt: Date.now()
     };
 
-    const newTopics = topics.map(t => {
-      if (t.id === selectedTopic.id) {
-        return { 
-          ...t, 
-          comments: [...(t.comments || []), commentData] 
-        };
-      }
-      return t;
-    });
-
-    saveToLocal(newTopics);
-    
-    // 更新当前选中的议题视图
-    setSelectedTopic(prev => ({
-      ...prev,
-      comments: [...(prev.comments || []), commentData]
-    }));
-    
-    setNewComment('');
+    try {
+      const topicRef = doc(db, 'artifacts', appId, 'public', 'data', 'topics', selectedTopic.id);
+      await updateDoc(topicRef, {
+        comments: arrayUnion(commentData)
+      });
+      setNewComment('');
+    } catch (err) {
+      console.error("评论失败:", err);
+    }
   };
 
   const openTopicDetail = (topic) => {
@@ -217,11 +291,39 @@ export default function YouAreNeededApp() {
 
   const formatDate = (timestamp) => {
     if (!timestamp) return 'Just now';
-    const date = new Date(timestamp);
-    return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    // 兼容 Firestore Timestamp 和普通 Date
+    try {
+        const date = timestamp.seconds ? new Date(timestamp.seconds * 1000) : new Date(timestamp);
+        return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    } catch (e) {
+        return 'Just now';
+    }
   };
 
   // --- 渲染界面 ---
+
+  if (configError) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="bg-white p-8 rounded-3xl shadow-xl max-w-md text-center border border-orange-100">
+          <div className="w-16 h-16 bg-orange-100 text-orange-500 rounded-full flex items-center justify-center mx-auto mb-4">
+            <AlertTriangle size={32} />
+          </div>
+          <h2 className="text-xl font-bold text-slate-800 mb-2">还差最后一步！</h2>
+          <p className="text-slate-500 text-sm mb-6 leading-relaxed">
+            奶奶，为了让大家互相能看见，我们需要配置一下“云端黑板”。<br/>
+            请在 Zeabur 的 <strong>Settings (设置)</strong> &rarr; <strong>Environment Variables (环境变量)</strong> 中添加 Firebase 的配置信息。
+          </p>
+          <div className="bg-slate-100 p-4 rounded-xl text-xs text-left font-mono text-slate-600 overflow-x-auto">
+            VITE_FIREBASE_API_KEY=...<br/>
+            VITE_FIREBASE_AUTH_DOMAIN=...<br/>
+            VITE_FIREBASE_PROJECT_ID=...<br/>
+            ... (以及其他几项)
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans selection:bg-orange-100 selection:text-orange-900 pb-20 relative overflow-hidden">
@@ -236,10 +338,13 @@ export default function YouAreNeededApp() {
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-xl border-b border-slate-200/60 supports-[backdrop-filter]:bg-white/60">
         <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="relative group cursor-default">
+            {/* LOGO 区域 - 纯代码生成版 (无需图片文件) */}
+            <div className="relative group cursor-pointer">
               <div className="absolute inset-0 bg-orange-400 blur-md opacity-20 group-hover:opacity-40 transition-opacity rounded-xl"></div>
-              <div className="relative w-10 h-10 bg-gradient-to-br from-orange-500 to-red-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-orange-500/20 group-hover:scale-105 transition-transform duration-300">
-                <Puzzle size={22} fill="currentColor" className="text-white/90" />
+              <div className="relative w-10 h-10 bg-gradient-to-br from-orange-500 to-red-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-orange-500/20 group-hover:scale-105 transition-transform duration-300 overflow-hidden">
+                {/* 增加一道顶部高光，增加立体感 */}
+                <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-b from-white/20 to-transparent opacity-50"></div>
+                <Puzzle size={22} fill="currentColor" className="text-white/95 relative z-10" />
               </div>
             </div>
             
