@@ -11,7 +11,8 @@ import {
   User, 
   Puzzle, 
   Activity,
-  AlertTriangle
+  AlertTriangle,
+  WifiOff
 } from 'lucide-react';
 import { initializeApp } from 'firebase/app';
 import { 
@@ -74,10 +75,11 @@ const app = firebaseConfig ? initializeApp(firebaseConfig) : null;
 const auth = app ? getAuth(app) : null;
 const db = app ? getFirestore(app) : null;
 
-// --- 修复 Path 问题 ---
+// --- 修复 Path 问题 (标准修复方案) ---
 // @ts-ignore
 const rawAppId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-// 关键修复: 将 appId 中的斜杠 / 替换为下划线 _，防止 Firebase 路径解析错误
+// 关键修复: 将 appId 中的斜杠 / 替换为下划线 _。
+// 这是最稳妥的方式，既能保证路径段数正确，又能尽可能匹配原本的 ID 意图。
 const appId = String(rawAppId).replace(/\//g, '_');
 
 // --- 组件部分 ---
@@ -136,6 +138,7 @@ export default function YouAreNeededApp() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [selectedTopic, setSelectedTopic] = useState(null);
   const [configError, setConfigError] = useState(!firebaseConfig); // 检查配置是否存在
+  const [errorMsg, setErrorMsg] = useState(null); // 错误提示状态
 
   // 表单状态
   const [newTitle, setNewTitle] = useState('');
@@ -161,6 +164,7 @@ export default function YouAreNeededApp() {
         }
       } catch (err) {
         console.error("登录失败:", err);
+        setErrorMsg("登录服务失败，请刷新页面");
       }
     };
     doLogin();
@@ -195,14 +199,17 @@ export default function YouAreNeededApp() {
         });
         setTopics(fetchedTopics);
         setLoading(false);
+        setErrorMsg(null); // 成功则清除错误
       }, (error) => {
         console.error("数据获取失败:", error);
+        setErrorMsg("连接云端黑板失败: " + (error.code || error.message));
         setLoading(false);
       });
 
       return () => unsubscribe();
     } catch (err) {
       console.error("监听设置失败:", err);
+      setErrorMsg("系统初始化失败");
       setLoading(false);
     }
   }, [user]);
@@ -385,6 +392,14 @@ export default function YouAreNeededApp() {
           </p>
         </div>
 
+        {/* 错误提示横幅 */}
+        {errorMsg && (
+          <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl flex items-center gap-3 text-red-600 animate-in fade-in slide-in-from-top-2">
+            <WifiOff size={20} />
+            <span className="text-sm font-medium">{errorMsg}</span>
+          </div>
+        )}
+
         {loading && (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 animate-pulse">
             {[1, 2, 3, 4, 5, 6].map(i => (
@@ -393,7 +408,7 @@ export default function YouAreNeededApp() {
           </div>
         )}
 
-        {!loading && topics.length === 0 && (
+        {!loading && topics.length === 0 && !errorMsg && (
           <div className="flex flex-col items-center justify-center py-20 text-center bg-white/50 backdrop-blur-sm rounded-3xl border border-dashed border-slate-300 mx-4">
             <div className="w-20 h-20 bg-orange-50 rounded-full flex items-center justify-center mb-4">
               <MessageCircle size={32} className="text-orange-400" />
